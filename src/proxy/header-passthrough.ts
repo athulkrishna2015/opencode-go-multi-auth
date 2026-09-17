@@ -15,9 +15,19 @@ const HOP_BY_HOP = new Set([
 
 const FORWARDED_HEADERS = new Set([
   'accept', 'accept-encoding', 'accept-language', 'content-type',
+  'user-agent',
   'anthropic-version', 'anthropic-beta',
   'x-opencode-session',
+  // Zen free-tier gate (FreeTierError) validates the client session, so the
+  // affinity header opencode sends for non-opencode providers must survive.
+  'x-session-affinity',
 ])
+
+// Zen's free tier rejects requests it cannot identify as OpenCode
+// ("free tier can only be used from within OpenCode"), so client
+// identity headers must pass through instead of being replaced by
+// the proxy runtime's own defaults.
+const FORWARDED_PREFIXES = ['x-opencode-', 'x-stainless-']
 
 export function isCacheHeader(name: string): boolean {
   return CACHE_HEADERS.has(name.toLowerCase())
@@ -52,7 +62,7 @@ export function buildUpstreamHeaders(
     if (lower === 'authorization' || lower === 'host' || lower === 'content-length') continue
     if (lower.startsWith('sec-') || lower.startsWith('cf-')) continue
 
-    if (CACHE_HEADERS.has(lower) || FORWARDED_HEADERS.has(lower)) {
+    if (CACHE_HEADERS.has(lower) || FORWARDED_HEADERS.has(lower) || FORWARDED_PREFIXES.some((p) => lower.startsWith(p))) {
       headers[key] = Array.isArray(value) ? value.join(', ') : String(value ?? '')
     }
   }
