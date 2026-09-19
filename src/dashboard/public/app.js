@@ -2497,10 +2497,16 @@ function renderZenDrift(drift) {
   const copyBtn = banner.querySelector('.zen-drift-copy');
   if (copyBtn && missing.length) {
     copyBtn.onclick = () => {
+      // Full input modalities: without these opencode treats a custom-provider
+      // model as text-only and refuses to attach images client-side, so the
+      // proxy never sees the request ("this model does not support image
+      // input"). The Zen catalog serves multimodal models, so new entries
+      // default to the full set; narrow per-model only if upstream 400s one.
+      const modalities = { input: ['text', 'image', 'video', 'pdf', 'audio'], output: ['text'] };
       const snippet = JSON.stringify({
         provider: {
           [drift.provider]: {
-            models: Object.fromEntries(missing.map(m => [m, {}])),
+            models: Object.fromEntries(missing.map(m => [m, { modalities }])),
           },
         },
       }, null, 2);
