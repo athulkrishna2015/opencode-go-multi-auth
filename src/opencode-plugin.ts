@@ -7,6 +7,7 @@ import type { Plugin, PluginModule } from '@opencode-ai/plugin'
 import { DEFAULT_CONFIG } from './router/types.js'
 import { setPluginMode, logToFile } from './logging/logger.js'
 import { getRuntimePaths, isProcessAlive, readPidState } from './runtime/daemon.js'
+import { ensureMirrorProvider, syncMirrorModels } from './plugin/zen-mirror.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -278,6 +279,10 @@ const OpenCodeGoMultiAuthPlugin: Plugin = async ({ client }) => {
   }).catch(() => {})
 
   return {
+    config: async (input) => {
+      ensureMirrorProvider(input, getProxyPort())
+      await syncMirrorModels(input, getProxyPort())
+    },
     dispose: async () => {
       // Shared daemon stays alive across OpenCode session exits.
     },
