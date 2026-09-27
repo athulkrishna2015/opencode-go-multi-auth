@@ -32,11 +32,11 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@opencode-ai/plugin": "^1.17.9",
     "@opencode-ai/sdk": "^1.17.0",
     "express": "^4.21.0",
     "winston": "^3.15.0",
-    "ws": "^8.18.0"
+    "ws": "^8.18.0",
+    "@opencode/plugin": "^2.0.18"
   },
   "devDependencies": {
     "@types/express": "^5.0.0",
@@ -46,12 +46,11 @@
     "typescript": "^5.6.0"
   },
   "peerDependencies": {
-    "@opencode-ai/plugin": "^1.17.9",
-    "@opencode-ai/sdk": "^1.17.0"
+    "@opencode/plugin": "^2.0.18"
   },
   "peerDependenciesMeta": {
-    "@opencode-ai/plugin": {
-      "optional": true
+    "@opencode/plugin": {
+      "optional": false
     }
   },
   "engines": {

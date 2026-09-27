@@ -3,11 +3,11 @@ import net from 'node:net'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
-import type { Plugin, PluginModule } from '@opencode-ai/plugin'
+import { Plugin } from '@opencode/plugin'
 import { DEFAULT_CONFIG } from './router/types.js'
 import { setPluginMode, logToFile } from './logging/logger.js'
 import { getRuntimePaths, isProcessAlive, readPidState } from './runtime/daemon.js'
-import { ensureMirrorProvider, syncMirrorModels } from './plugin/zen-mirror.js'
+import { MIRROR_PROVIDER_ID, buildMirrorModels, fetchLiveIds, mirrorProviderInfo } from './plugin/zen-mirror.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -262,36 +262,69 @@ async function ensureRouterDaemon(): Promise<'reused' | 'started' | 'failed'> {
   }
 }
 
-const OpenCodeGoMultiAuthPlugin: Plugin = async ({ client }) => {
-  setPluginMode(true)
-  const status = await ensureRouterDaemon()
+const REFRESH_MS = 60_000
+// The official Zen catalog lives on the host's built-in `opencode` provider.
+const ZEN_CATALOG_PROVIDER_ID = 'opencode'
 
-  await client.app.log({
-    body: {
-      service: 'opencode-go-multi-auth',
-      level: status === 'failed' ? 'error' : 'info',
-      message: status === 'started'
+export default Plugin.define({
+  id: 'opencode-go-multi-auth',
+
+  async setup(ctx) {
+    setPluginMode(true)
+    const status = await ensureRouterDaemon()
+    logToFile(
+      status === 'failed' ? 'error' : 'info',
+      status === 'started'
         ? 'Multi-auth router daemon started.'
         : status === 'reused'
           ? 'Multi-auth router daemon reused.'
           : 'Multi-auth router daemon failed to start.',
-    },
-  }).catch(() => {})
+      { proxyPort: getProxyPort(), dashboardPort: getDashboardPort() },
+    )
 
-  return {
-    config: async (input) => {
-      ensureMirrorProvider(input, getProxyPort())
-      await syncMirrorModels(input, getProxyPort())
-    },
-    dispose: async () => {
-      // Shared daemon stays alive across OpenCode session exits.
-    },
-  }
-}
+    const proxyPort = getProxyPort()
+    // null means "not known yet": an unreachable proxy must not publish an
+    // empty inventory over the models already in the user's config.
+    let live: string[] | null = null
 
-export const server = OpenCodeGoMultiAuthPlugin
-export const pluginModule: PluginModule = {
-  id: 'opencode-go-multi-auth',
-  server: OpenCodeGoMultiAuthPlugin,
-}
-export default OpenCodeGoMultiAuthPlugin
+    const sync = async (): Promise<void> => {
+      const ids = await fetchLiveIds(proxyPort)
+      if (ids) {
+        live = ids
+        logToFile('info', `Zen mirror: provider "${MIRROR_PROVIDER_ID}" synced with ${ids.length} models.`)
+      }
+    }
+
+    // Populate before registering: a transform replayed with no capture would
+    // publish nothing, leaving the first pass dependent on reload().
+    await sync()
+
+    await ctx.provider.transform((editor) => {
+      if (!live) return
+      const catalog = editor.get(ZEN_CATALOG_PROVIDER_ID)?.models
+      // Replay starts from a fresh registry, so add() every pass rather than
+      // mutating a registration that is no longer there.
+      editor.add({
+        info: mirrorProviderInfo(proxyPort),
+        models: buildMirrorModels(live, catalog),
+      })
+    })
+
+    // The proxy's pool changes over time, so keep the list current rather than
+    // only fixing it at startup.
+    const timer = setInterval(() => {
+      void sync()
+        .then(() => ctx.provider.reload())
+        .catch((error: unknown) => {
+          logToFile('warn', 'Zen mirror: refresh failed.', {
+            error: error instanceof Error ? error.message : String(error),
+          })
+        })
+    }, REFRESH_MS)
+
+    return () => {
+      clearInterval(timer)
+      // The shared daemon stays alive across OpenCode session exits.
+    }
+  },
+})

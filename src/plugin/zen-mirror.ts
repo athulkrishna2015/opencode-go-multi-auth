@@ -1,156 +1,102 @@
-import fs from 'node:fs'
-import os from 'node:os'
-import path from 'node:path'
-import type { Config } from '@opencode-ai/plugin'
+import { Model, Provider } from '@opencode/plugin'
 import { logToFile } from '../logging/logger.js'
 
 export const MIRROR_PROVIDER_ID = 'multi-auth-zen'
-const PROXY_NPM = '@ai-sdk/openai-compatible'
-// Placeholder credential: the proxy pools its own keys and overwrites
-// incoming auth, so this value never leaves the machine as auth.
+export const PROXY_NPM = '@ai-sdk/openai-compatible'
+// Placeholder credential: the proxy pools its own keys and overwrites incoming
+// auth, so this value never leaves the machine as auth.
 const POOL_API_KEY = 'multi-auth-pool'
 const FULL_INPUT = ['text', 'image', 'video', 'pdf', 'audio']
 
-interface BundleModel {
-  id?: string
-  name?: string
-  status?: string
-  modalities?: { input?: string[]; output?: string[] }
-  limit?: { context?: number; input?: number; output?: number }
-  cost?: { input?: number; output?: number; cache_read?: number; cache_write?: number }
-  reasoning_options?: Array<{ type?: string; values?: Array<string | null> }>
-}
+/**
+ * Identity and routing fields. Everything else on a catalog entry describes the
+ * model and is safe to carry across. The routing four matter: official Zen
+ * entries carry `package: "@opencode/ai/providers/openai"` and
+ * `settings: { provider: "opencode" }` per model, and reusing those would send
+ * the model to the real upstream instead of the local proxy.
+ */
+const ROUTING = new Set(['id', 'modelID', 'providerID', 'package', 'settings', 'headers', 'body'])
 
-function bundlePath(): string {
-  const cache = process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache')
-  return path.join(cache, 'opencode', 'models.json')
-}
-
-function readOfficialModels(): Record<string, BundleModel> {
-  try {
-    const raw = fs.readFileSync(bundlePath(), 'utf8')
-    const bundle = JSON.parse(raw) as Record<string, { models?: Record<string, BundleModel> }>
-    return bundle.opencode?.models ?? {}
-  } catch (err) {
-    logToFile('warn', 'Zen mirror: official models bundle unreadable, new models get defaults.', {
-      error: err instanceof Error ? err.message : String(err),
-    })
-    return {}
-  }
+/** The mirror provider: the proxy's pooled Zen endpoint. */
+export function mirrorProviderInfo(proxyPort: number): Provider.Info {
+  const id = Provider.ID.make(MIRROR_PROVIDER_ID)
+  return {
+    ...Provider.Info.empty(id),
+    name: 'OpenCode Zen (multi-auth)',
+    activation: 'enabled',
+    package: `aisdk:${PROXY_NPM}`,
+    settings: { baseURL: `http://localhost:${proxyPort}/zen`, apiKey: POOL_API_KEY },
+  } as Provider.Info
 }
 
 /**
- * In-memory only: guarantees the mirror provider block exists with the
- * proxy wiring. Never touches the user's file.
+ * Build the mirror's model inventory.
+ *
+ * Metadata comes from the official catalog the host already holds, which is
+ * read through the provider transform rather than re-derived from
+ * ~/.cache/opencode/models.json. That bundle is models.dev's raw V1 shape, so
+ * using it means rebuilding capabilities, cost tiers and effort variants by
+ * hand — and getting them subtly wrong, because the effort parameter differs per
+ * model family (Claude wants `thinking.effort`, GPT `reasoningEffort`, Gemini
+ * `thinkingConfig`). Cloning the host's entries carries the right shape for
+ * every model, and a model the catalog has retired drops out of the mirror.
+ *
+ * A model the live proxy serves that the catalog does not know yet is included
+ * fail-open with full input modalities: Zen is multimodal, and a text-only
+ * default would wall off images.
  */
-export function ensureMirrorProvider(input: Config, proxyPort: number): void {
-  const root = input as unknown as { provider?: Record<string, Record<string, unknown>> }
-  const providers = (root.provider ??= {})
-  const block = ((providers[MIRROR_PROVIDER_ID] ??= {}) as Record<string, unknown>)
-  block.npm ??= PROXY_NPM
-  block.name ??= 'OpenCode Zen (multi-auth)'
-  const options = ((block.options ??= {}) as Record<string, unknown>)
-  options.baseURL ??= `http://localhost:${proxyPort}/zen`
-  options.apiKey ??= POOL_API_KEY
-}
+export function buildMirrorModels(
+  liveIds: readonly string[],
+  catalog: ReadonlyMap<string, Model.Info> | undefined,
+): Model.Info[] {
+  const providerID = Provider.ID.make(MIRROR_PROVIDER_ID)
+  const models: Model.Info[] = []
 
-// Effort values become selectable variants. Bodies stay minimal
-// ({reasoningEffort}) because the mirror speaks openai-compatible: the
-// Responses-only extras the official @ai-sdk/openai entries carry
-// (reasoningSummary/include) have no chat/completions equivalent.
-function variantsFrom(model: BundleModel): Record<string, Record<string, unknown>> | undefined {
-  const effort = (model.reasoning_options ?? []).find((o) => o.type === 'effort')
-  const values = effort?.values ?? []
-  const out: Record<string, Record<string, unknown>> = {}
-  for (const v of values) {
-    const name = v === null ? 'none' : v
-    if (typeof name === 'string' && name) out[name] = { reasoningEffort: name }
-  }
-  return Object.keys(out).length > 0 ? out : undefined
-}
+  for (const modelID of liveIds) {
+    const source = catalog?.get(modelID)
 
-function toConfigModel(model: BundleModel): Record<string, unknown> {
-  const entry: Record<string, unknown> = {
-    modalities: {
-      input: model.modalities?.input ?? [...FULL_INPUT],
-      output: model.modalities?.output ?? ['text'],
-    },
-  }
-  if (model.name) entry.name = model.name
-  const variants = variantsFrom(model)
-  if (variants) entry.variants = variants
-  if (model.limit) entry.limit = model.limit
-  if (model.cost) {
-    entry.cost = {
-      input: model.cost.input ?? 0,
-      output: model.cost.output ?? 0,
-      cache_read: model.cost.cache_read ?? 0,
-      cache_write: model.cost.cache_write ?? 0,
+    if (source?.status === 'deprecated') {
+      logToFile('info', `Zen mirror: "${modelID}" is deprecated upstream, dropping it.`)
+      continue
     }
+
+    if (source) {
+      const base = Model.Info.default(providerID, Model.ID.make(modelID))
+      const described: Record<string, unknown> = {}
+      for (const [key, value] of Object.entries(source)) {
+        if (!ROUTING.has(key) && value !== undefined) described[key] = value
+      }
+      models.push({ ...base, ...described, id: base.id, modelID: base.modelID, providerID: base.providerID } as Model.Info)
+      continue
+    }
+
+    logToFile('info', `Zen mirror: new upstream model "${modelID}" auto-added with default metadata.`)
+    const base = Model.Info.default(providerID, Model.ID.make(modelID))
+    models.push({ ...base, capabilities: { ...base.capabilities, input: [...FULL_INPUT] } } as Model.Info)
   }
-  return entry
+
+  return models
 }
 
-// A model the live upstream serves but the official bundle does not know
-// yet: include it fail-open with full input modalities (the Zen catalog is
-// multimodal; text-only default would wall off images) and no variants.
-function toDefaultConfigModel(id: string): Record<string, unknown> {
-  return {
-    modalities: { input: [...FULL_INPUT], output: ['text'] },
-  }
-}
-
-async function fetchLiveIds(proxyPort: number): Promise<string[] | null> {
+/**
+ * Ids the proxy is currently serving. Returns null when the proxy is
+ * unreachable so the caller can keep the previous list rather than emptying
+ * the model picker.
+ */
+export async function fetchLiveIds(proxyPort: number): Promise<string[] | null> {
   try {
     const res = await fetch(`http://127.0.0.1:${proxyPort}/zen/v1/models`, {
       signal: AbortSignal.timeout(10_000),
     })
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     const json = (await res.json()) as { data?: Array<{ id?: string }> }
-    return (json.data ?? []).map((m) => m.id).filter((id): id is string => Boolean(id))
+    const ids = (json.data ?? []).map((m) => m.id).filter((id): id is string => Boolean(id))
+    if (!ids.length) throw new Error('returned no usable models')
+    return [...new Set(ids)]
   } catch (err) {
-    logToFile('warn', 'Zen mirror: live catalog unreachable, serving official list only.', {
+    logToFile('warn', 'Zen mirror: live catalog unreachable, keeping the previous list.', {
       error: err instanceof Error ? err.message : String(err),
     })
     return null
   }
-}
-
-/**
- * Rebuilds the mirror provider's models map from the official `opencode`
- * catalog (modalities, effort variants, limits, costs) intersected with the
- * live Zen catalog served through the proxy. New upstream models are added
- * automatically; deprecated / vanished ones drop out. Runs once per
- * opencode start via the plugin config hook, so no manual opencode.json
- * edits are ever needed.
- */
-export async function syncMirrorModels(input: Config, proxyPort: number): Promise<void> {
-  const root = input as unknown as { provider?: Record<string, Record<string, unknown>> }
-  const block = ((root.provider ??= {})[MIRROR_PROVIDER_ID] ??= {}) as Record<string, unknown>
-
-  const official = readOfficialModels()
-  const live = await fetchLiveIds(proxyPort)
-
-  const models: Record<string, Record<string, unknown>> = {}
-  if (live === null) {
-    for (const [id, model] of Object.entries(official)) {
-      if (model.status === 'deprecated') continue
-      models[id] = toConfigModel(model)
-    }
-  } else {
-    const liveSet = new Set(live)
-    for (const [id, model] of Object.entries(official)) {
-      if (model.status === 'deprecated') continue
-      if (!liveSet.has(id)) continue
-      models[id] = toConfigModel(model)
-    }
-    const known = new Set(Object.keys(official))
-    for (const id of live) {
-      if (known.has(id)) continue
-      logToFile('info', `Zen mirror: new upstream model "${id}" auto-added with default metadata.`)
-      models[id] = toDefaultConfigModel(id)
-    }
-  }
-  block.models = models
-  logToFile('info', `Zen mirror: provider "${MIRROR_PROVIDER_ID}" synced with ${Object.keys(models).length} models.`)
 }
