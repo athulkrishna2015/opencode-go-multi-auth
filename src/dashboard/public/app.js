@@ -2427,6 +2427,7 @@ function renderZenDrift(drift) {
   const ts = drift.lastCheckAt ? new Date(drift.lastCheckAt).toLocaleString() : '—';
   const providerMissing = drift.providerMissing;
   const missing = drift.missing || [];
+  const freeExcluded = drift.freeExcluded || [];
   const stale = drift.stale || [];
   const liveError = drift.liveError;
 
@@ -2492,7 +2493,16 @@ function renderZenDrift(drift) {
     </div>
   ` : '';
 
-  banner.innerHTML = missingBlock + staleBlock;
+  const freeBlock = freeExcluded.length ? `
+    <div class="zen-drift-banner is-muted">
+      <div class="zen-drift-headline">
+        <strong>${freeExcluded.length} free-tier model${freeExcluded.length === 1 ? '' : 's'}</strong> hidden — requires native <code>opencode/&lt;model&gt;</code>, 403s through the API-key proxy:
+        ${freeExcluded.map(m => `<code class="zen-drift-chip">${escapeHtml(m)}</code>`).join(' ')}
+      </div>
+    </div>
+  ` : '';
+
+  banner.innerHTML = missingBlock + staleBlock + freeBlock;
 
   const copyBtn = banner.querySelector('.zen-drift-copy');
   if (copyBtn && missing.length) {

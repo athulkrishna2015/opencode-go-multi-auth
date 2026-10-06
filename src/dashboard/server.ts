@@ -417,7 +417,12 @@ export class DashboardServer {
 
       const configuredSet = new Set(configured)
       const liveSet = new Set(live)
-      const missing = live.filter(m => !configuredSet.has(m)).sort()
+      // Free-tier IDs (ending in -free / -contributor-free) require the
+      // native OpenCode user session and 403 through the API-key proxy, so
+      // never suggest adding them to the pooled provider.
+      const isFreeTier = (m: string): boolean => /(?:^|-)free$/i.test(m)
+      const missing = live.filter(m => !configuredSet.has(m) && !isFreeTier(m)).sort()
+      const freeExcluded = live.filter(m => !configuredSet.has(m) && isFreeTier(m)).sort()
       const stale = configured.filter(m => !liveSet.has(m)).sort()
 
       res.json({
@@ -425,6 +430,7 @@ export class DashboardServer {
         configured,
         live,
         missing,
+        freeExcluded,
         stale,
         providerMissing,
         liveError,
