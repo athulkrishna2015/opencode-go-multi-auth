@@ -23,6 +23,7 @@ export interface ApiKey {
   costAccumulated: number
   quotaErrorCount: number
   lastQuotaError: QuotaErrorSignal | null
+  modelCooldowns: Record<string, number>
   requestCount: number
   successCount: number
   errorCount: number
@@ -63,6 +64,7 @@ export interface RoutingStrategyInfo {
 
 export interface KeySelectionContext {
   excludeKeyIds?: Set<string>
+  modelTier?: 'free' | 'paid' | null
 }
 
 export interface KeySelection {

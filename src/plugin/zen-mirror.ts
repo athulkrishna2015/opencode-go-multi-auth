@@ -53,6 +53,11 @@ export function buildMirrorModels(
   const models: Model.Info[] = []
 
   for (const modelID of liveIds) {
+    if (/(?:^|-)free$/i.test(modelID)) {
+      logToFile('info', `Zen mirror: "${modelID}" requires the native OpenCode session, dropping it from the pooled provider.`)
+      continue
+    }
+
     const source = catalog?.get(modelID)
 
     if (source?.status === 'deprecated') {

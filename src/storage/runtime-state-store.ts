@@ -41,6 +41,8 @@ export interface StoredKeyRuntimeState {
   costAccumulated: number
   quotaErrorCount: number
   lastQuotaError: StoredQuotaError | null
+  lastQuotaModel?: string | null
+  modelCooldowns?: Record<string, number>
   requestCount: number
   successCount: number
   errorCount: number
@@ -86,9 +88,17 @@ export class RuntimeStateStore {
     try {
       const raw = fs.readFileSync(this.filePath, 'utf8')
       const parsed = JSON.parse(raw) as Partial<RouterRuntimeState>
+      const keys = Array.isArray(parsed.keys) ? parsed.keys : []
+      const latestQuotaModel = new Map<string, string>()
+      for (const entry of [...(Array.isArray(parsed.logs) ? parsed.logs : [])].reverse()) {
+        if (!/quota exhausted \(HTTP (?:402|429)\)/i.test(entry.message)) continue
+        const keyId = typeof entry.meta?.keyId === 'string' ? entry.meta.keyId : null
+        const model = typeof entry.meta?.model === 'string' ? entry.meta.model : null
+        if (keyId && model && !latestQuotaModel.has(keyId)) latestQuotaModel.set(keyId, model)
+      }
       return {
         version: CURRENT_VERSION,
-        keys: Array.isArray(parsed.keys) ? parsed.keys : [],
+        keys: keys.map((entry) => ({ ...entry, lastQuotaModel: latestQuotaModel.get(entry.id) ?? null })),
         quota: Array.isArray(parsed.quota) ? parsed.quota : [],
         logs: Array.isArray(parsed.logs) ? parsed.logs : [],
       }

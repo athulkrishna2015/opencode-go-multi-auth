@@ -63,6 +63,7 @@ export class KeyManager {
       costAccumulated: 0,
       quotaErrorCount: 0,
       lastQuotaError: null,
+      modelCooldowns: {},
       requestCount: 0,
       successCount: 0,
       errorCount: 0,
@@ -98,6 +99,18 @@ export class KeyManager {
       key.costAccumulated = this.normalizeNumber(state.costAccumulated)
       key.quotaErrorCount = this.normalizeNumber(state.quotaErrorCount)
       key.lastQuotaError = this.normalizeQuotaError(state.lastQuotaError)
+      key.modelCooldowns = this.normalizeModelCooldowns(state.modelCooldowns)
+      if (
+        state.status === 'cooldown'
+        && state.lastQuotaModel
+        && key.lastQuotaError?.statusCode === 402
+        && /insufficient account funds/i.test(key.lastQuotaError.message)
+      ) {
+        const tier = this.modelTier(state.lastQuotaModel)
+        key.modelCooldowns[tier] = Math.max(key.modelCooldowns[tier] ?? 0, key.cooldownUntil ?? key.lastQuotaError.resetAt ?? Date.now())
+        key.status = 'active'
+        key.cooldownUntil = null
+      }
       key.requestCount = this.normalizeNumber(state.requestCount)
       key.successCount = this.normalizeNumber(state.successCount)
       key.errorCount = this.normalizeNumber(state.errorCount)
@@ -174,11 +187,27 @@ export class KeyManager {
     }
   }
 
+  getActiveKeysForTier(tier: 'free' | 'paid'): ApiKey[] {
+    const now = Date.now()
+    return this.getActiveKeys().filter((key) => (key.modelCooldowns[tier] ?? 0) <= now)
+  }
+
   markExhausted(id: string, cooldownMs: number, signal?: QuotaErrorSignal): void {
     const key = this.getKeyById(id)
     if (!key) return
     key.status = 'cooldown'
     key.cooldownUntil = Date.now() + cooldownMs
+    if (signal) {
+      key.quotaErrorCount += 1
+      key.lastQuotaError = signal
+    }
+    this.onChange?.()
+  }
+
+  markTierExhausted(id: string, tier: 'free' | 'paid', cooldownMs: number, signal?: QuotaErrorSignal): void {
+    const key = this.getKeyById(id)
+    if (!key) return
+    key.modelCooldowns[tier] = Date.now() + cooldownMs
     if (signal) {
       key.quotaErrorCount += 1
       key.lastQuotaError = signal
@@ -208,6 +237,7 @@ export class KeyManager {
     key.status = 'active'
     key.cooldownUntil = null
     key.consecutiveErrors = 0
+    key.modelCooldowns = {}
     this.clearQuotaError(id)
   }
 
@@ -318,6 +348,7 @@ export class KeyManager {
       costAccumulated: key.costAccumulated,
       quotaErrorCount: key.quotaErrorCount,
       lastQuotaError: key.lastQuotaError,
+      modelCooldowns: key.modelCooldowns,
       requestCount: key.requestCount,
       successCount: key.successCount,
       errorCount: key.errorCount,
@@ -331,7 +362,14 @@ export class KeyManager {
 
   private getCandidateKeys(context: KeySelectionContext): ApiKey[] {
     const excluded = context.excludeKeyIds ?? new Set<string>()
-    return this.getActiveKeys().filter((key) => !excluded.has(key.id))
+    return this.getActiveKeys().filter((key) =>
+      !excluded.has(key.id)
+      && (!context.modelTier || (key.modelCooldowns[context.modelTier] ?? 0) <= Date.now()),
+    )
+  }
+
+  private modelTier(modelID: string): 'free' | 'paid' {
+    return /(?:^|-)free$/i.test(modelID) ? 'free' : 'paid'
   }
 
   private sortKeys(): void {
@@ -397,5 +435,14 @@ export class KeyManager {
       resetAt,
       message: typeof v.message === 'string' ? v.message : '',
     }
+  }
+
+  private normalizeModelCooldowns(value: unknown): Record<string, number> {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+    const result: Record<string, number> = {}
+    for (const [modelID, until] of Object.entries(value)) {
+      if (typeof until === 'number' && Number.isFinite(until)) result[modelID] = until
+    }
+    return result
   }
 }

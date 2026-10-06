@@ -120,12 +120,9 @@ Add providers that route through the proxy in `~/.config/opencode/opencode.json`
         "baseURL": "http://localhost:18905/zen"
       },
       "models": {
-        "deepseek-v4-flash-free": {},
-        "mimo-v2.5-free": {},
-        "qwen3.6-plus-free": {},
-        "minimax-m3-free": {},
-        "nemotron-3-ultra-free": {},
-        "north-mini-code-free": {}
+        "deepseek-v4-flash": {},
+        "qwen3.6-plus": {},
+        "minimax-m3": {}
       }
     }
   }
@@ -183,7 +180,9 @@ npm run build
 
 The proxy serves both **OpenCode Go** (paid subscription) and **OpenCode Zen** (free tier + paid models) from the same `localhost:18905`. Requests whose path starts with `/zen/` are forwarded to `https://opencode.ai/zen/v1`; everything else goes to `https://opencode.ai/zen/go/v1`. The `/zen/` prefix is stripped before forwarding.
 
-Both upstreams support Anthropic-format (`/v1/messages`) and OpenAI-format (`/v1/chat/completions`) requests. The free Zen models use the OpenAI format, so add a **second** custom provider alongside the built-in `opencode-go` you already set up (see the [Installation config](#opencode-config) for the full example):
+Both upstreams support Anthropic-format (`/v1/messages`) and OpenAI-format (`/v1/chat/completions`) requests. Zen subscription models that allow API-key access can be routed through the custom provider below. **Zen free-tier models (IDs ending in `-free` or `-contributor-free`, including `muse-spark-1.3-contributor-free`) require the built-in OpenCode user session and cannot be pooled through this API-key proxy.** Use `opencode/<model>` for those models instead. Upstream rejects pooled API-key requests with `403 FreeTierError`, regardless of whether the client uses `/chat/completions`, `/responses`, or OpenCode-identifying headers.
+
+For proxy-compatible Zen models, add a **second** custom provider alongside the built-in `opencode-go` you already set up (see the [Installation config](#opencode-config) for the full example):
 
 ```json
 {
@@ -197,12 +196,9 @@ Both upstreams support Anthropic-format (`/v1/messages`) and OpenAI-format (`/v1
       "name": "OpenCode Zen (multi-auth)",
       "options": { "baseURL": "http://localhost:18905/zen" },
       "models": {
-        "deepseek-v4-flash-free": {},
-        "mimo-v2.5-free": {},
-        "qwen3.6-plus-free": {},
-        "minimax-m3-free": {},
-        "nemotron-3-ultra-free": {},
-        "north-mini-code-free": {}
+        "deepseek-v4-flash": {},
+        "qwen3.6-plus": {},
+        "minimax-m3": {}
       }
     }
   }
@@ -214,15 +210,15 @@ Then reference the provider from agents as `multi-auth-zen/<model>`, e.g.
 ```json
 {
   "agent": {
-    "explore": { "model": "multi-auth-zen/deepseek-v4-flash-free" },
-    "general": { "model": "multi-auth-zen/deepseek-v4-flash-free" }
+    "explore": { "model": "multi-auth-zen/deepseek-v4-flash" },
+    "general": { "model": "multi-auth-zen/deepseek-v4-flash" }
   }
 }
 ```
 
 **Important:** the provider name must be unique. Do **not** use `opencode-zen` or `opencode` — those collide with OpenCode's built-in Zen provider and OpenCode will silently route requests directly to `opencode.ai`, bypassing the proxy entirely. Any other name (e.g. `multi-auth-zen`, `proxy-zen`, `my-zen`) works.
 
-When new free models appear upstream, the dashboard's **Models** page surfaces a drift banner with a **Copy snippet** button so you can paste the missing models into your `models` block. The check runs every 12 hours while the page is open. You can also change the provider name tracked by the dashboard via the text input next to the Save button (default: `multi-auth-zen`).
+When new Zen models appear upstream, the dashboard's **Models** page surfaces a drift banner with a **Copy snippet** button so you can paste missing models into your `models` block. The check runs every 12 hours while the page is open. Do not add `*-free` or `*-contributor-free` models to this proxy provider; select them through the built-in `opencode/` provider instead. You can also change the provider name tracked by the dashboard via the text input next to the Save button (default: `multi-auth-zen`).
 
 ## Routing Strategies
 

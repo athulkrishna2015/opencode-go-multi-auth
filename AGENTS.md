@@ -56,23 +56,25 @@ Add new tooling only after confirming with the user.
 
 ### Hot-swap pattern (when an agent needs to restart the daemon)
 
-**The agent must NOT kill or restart the daemon itself.** The agent's
-own shell session is itself routed through the proxy on port 18905.
-Restarting the daemon tears down the proxy the agent is using, which
-can corrupt the in-flight `opencode` turn, the WebSocket log stream,
-and the live edits the user is making. **Always ask the user to run
-the restart command themselves** and wait for them to confirm before
-proceeding.
+**The agent must not kill or restart the daemon without explicit user
+permission.** The agent's own shell session may be routed through the
+proxy on port 18905. Restarting the daemon tears down the proxy the agent
+may be using, which can corrupt the in-flight `opencode` turn, the
+WebSocket log stream, and the live edits the user is making. Without
+permission, ask the user to run the restart command themselves and wait
+for confirmation. If the user explicitly authorizes the restart, the
+agent may run the canonical `./restart-router.sh` procedure, then verify
+the health endpoint before continuing.
 
 When backend code changes (`src/`, `npm run build`) require a restart,
 or when something is stuck, the agent should:
 
 1. Build: `npm run build` (the agent is allowed to do this — it
    writes to `dist/` only and does not touch running processes).
-2. Tell the user to run `./restart-router.sh` from the repo root
-   (or the equivalent one-liner below) and wait.
-3. Verify with `curl -sf http://127.0.0.1:18904/healthz` after the
-   user reports back.
+2. If the user explicitly authorized a restart, run
+   `./restart-router.sh` from the repo root; otherwise ask the user to
+   run it and wait for confirmation.
+3. Verify with `curl -sf http://127.0.0.1:18904/healthz` after restart.
 4. Never `kill` the daemon, never `kill -9` it, never run
    `node dist/bin.js` in the foreground. Restarting the router also
    does **not** affect the OpenCode session (`opencode serve` /

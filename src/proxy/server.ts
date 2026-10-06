@@ -153,6 +153,7 @@ export class ProxyServer {
     let requestBody = body
     const isZenChatCompletions = isZenRequest && req.method === 'POST' && req.url && isChatCompletionsPath(req.url.split('?')[0])
     const requestModel = this.extractModelName(body)
+    const modelTier = requestModel ? (/(?:^|-)free$/i.test(requestModel) ? 'free' : 'paid') : null
     if (isZenChatCompletions && requestModel && req.url && this.zenResponsesModelMemo.has(requestModel)) {
       const translatedBody = toResponsesRequestBody(body)
       if (translatedBody) {
@@ -176,7 +177,7 @@ export class ProxyServer {
     // key's circuit breaker, so one unroutable model cannot open every breaker
     // in the pool and take healthy keys out of rotation for unrelated traffic.
     let upstreamServerErrorSeen = false
-    const totalKeys = this.keyManager.getActiveKeys().length
+    const totalKeys = modelTier ? this.keyManager.getActiveKeysForTier(modelTier).length : this.keyManager.getActiveKeys().length
     const maxAttempts = totalKeys || 1
     let lastError = 'All API keys exhausted'
 
@@ -206,7 +207,7 @@ export class ProxyServer {
       if (upstreamAbortController.signal.aborted) {
         return
       }
-      const decision = this.selectKey(sessionKey, attemptedKeyIds)
+      const decision = this.selectKey(sessionKey, attemptedKeyIds, modelTier)
 
       if (!decision) {
         if (this.keyManager.getKeys().some((key) => key.enabled)) {
@@ -326,7 +327,13 @@ export class ProxyServer {
           const responseBody = await responseTextPromise
           const isQuota = isQuota429(upstreamRes.status, Object.fromEntries(upstreamRes.headers), responseBody)
           if (isQuota) {
-            const remainingKeys = this.keyManager.getActiveKeys().filter((entry) => entry.id !== key.id && !attemptedKeyIds.has(entry.id)).length
+            const insufficientFunds = modelTier !== null
+              && upstreamRes.status === 402
+              && /insufficient account funds/i.test(this.extractQuotaMessage(responseBody, upstreamRes.status))
+            const remainingKeys = (insufficientFunds && modelTier
+              ? this.keyManager.getActiveKeysForTier(modelTier)
+              : this.keyManager.getActiveKeys()
+            ).filter((entry) => entry.id !== key.id && !attemptedKeyIds.has(entry.id)).length
             const now = Date.now()
             const headerCooldownMs = resolveCooldownMs(Object.fromEntries(upstreamRes.headers), responseBody, now, this.config.fallbackCooldownMs)
             const resetAt = now + headerCooldownMs
@@ -337,9 +344,13 @@ export class ProxyServer {
               resetAt,
               message: this.extractQuotaMessage(responseBody, upstreamRes.status),
             }
-            this.keyManager.markExhausted(key.id, headerCooldownMs, signal)
-            this.circuitBreaker.recordFailure(key.id)
-            this.keyManager.markError(key.id)
+            if (insufficientFunds && modelTier) {
+              this.keyManager.markTierExhausted(key.id, modelTier, headerCooldownMs, signal)
+            } else {
+              this.keyManager.markExhausted(key.id, headerCooldownMs, signal)
+            }
+            if (!insufficientFunds) this.circuitBreaker.recordFailure(key.id)
+            if (!insufficientFunds) this.keyManager.markError(key.id)
             this.keyManager.recordRequest(key.id, {
               statusCode: upstreamRes.status,
               durationMs: duration,
@@ -350,7 +361,7 @@ export class ProxyServer {
             attemptedKeyIds.add(key.id)
 
             const cooldownHours = (headerCooldownMs / 3_600_000).toFixed(1)
-            await this.notifier.keyExhausted(key.alias, upstreamRes.status, remainingKeys)
+            if (!insufficientFunds) await this.notifier.keyExhausted(key.alias, upstreamRes.status, remainingKeys)
             this.logStream.emit(
               this.logger,
               'warn',
@@ -369,12 +380,13 @@ export class ProxyServer {
                 sessionId: upstreamSessionId ?? sessionKey ?? null,
                 cooldownMs: headerCooldownMs,
                 quotaError: signal,
+                modelTier: insufficientFunds ? modelTier : null,
                 attempt: attempt + 1,
                 upstream: isZenRequest ? 'zen' : 'go',
               },
             )
 
-            if (remainingKeys === 0) {
+            if (remainingKeys === 0 && !insufficientFunds) {
               await this.notifier.allKeysExhausted(this.keyManager.getKeys().filter((entry) => entry.enabled).length)
             }
             continue
@@ -442,6 +454,36 @@ export class ProxyServer {
         // neither feed nor reset the breaker.
 
         const responseHeaders = this.buildResponseHeaders(upstreamRes)
+        const upstreamErrorBody = upstreamRes.status === 403 ? await responseTextPromise : ''
+        if (isZenRequest && upstreamRes.status === 403 && this.isZenFreeTierError(upstreamErrorBody)) {
+          const message = 'OpenCode Zen contributor-free models require the native OpenCode Zen user session and cannot be called through the multi-auth API-key proxy. Retry with opencode/<model> (for example, opencode/muse-spark-1.3-contributor-free).'
+          res.writeHead(403, { 'content-type': 'application/json; charset=utf-8' })
+          res.end(JSON.stringify({
+            error: {
+              type: 'FreeTierError',
+              message,
+            },
+          }))
+          this.keyManager.recordRequest(key.id, {
+            statusCode: upstreamRes.status,
+            durationMs: duration,
+            model: prepared.model,
+            sessionId: upstreamSessionId ?? sessionKey ?? null,
+            successful: false,
+          })
+          this.logStream.emit(this.logger, 'warn', `${req.method} ${targetPath} -> ${upstreamRes.status}: Zen free tier requires native OpenCode auth`, {
+            method: req.method,
+            path: targetPath,
+            statusCode: upstreamRes.status,
+            keyAlias: key.alias,
+            keyId: key.id,
+            duration,
+            model: prepared.model,
+            sessionId: upstreamSessionId ?? sessionKey ?? null,
+            upstream: 'zen',
+          })
+          return
+        }
         if (translateZenResponses && upstreamRes.status < 400 && upstreamRes.body) {
           res.writeHead(upstreamRes.status, responseHeaders)
           if (prepared.stream) {
@@ -613,14 +655,20 @@ export class ProxyServer {
     return Math.min(Math.max(headerMs, tuning.circuitBreakerRecoveryMs), tuning.retryAfterCapMs)
   }
 
-  private selectKey(sessionKey: string | undefined, attemptedKeyIds: Set<string>): RoutingDecision | null {
+  private selectKey(sessionKey: string | undefined, attemptedKeyIds: Set<string>, modelTier: 'free' | 'paid' | null): RoutingDecision | null {
     const strategy = normalizeRoutingStrategy(this.getStrategy())
 
     if (sessionKey) {
       const preferredId = this.sessionAffinity.getPreferredKey(sessionKey)
       if (preferredId && !attemptedKeyIds.has(preferredId)) {
         const preferredKey = this.keyManager.getKeyById(preferredId)
-        if (preferredKey && preferredKey.enabled && preferredKey.status === 'active' && this.circuitBreaker.isAvailable(preferredId)) {
+        if (
+          preferredKey
+          && preferredKey.enabled
+          && preferredKey.status === 'active'
+          && (!modelTier || (preferredKey.modelCooldowns[modelTier] ?? 0) <= Date.now())
+          && this.circuitBreaker.isAvailable(preferredId)
+        ) {
           return {
             key: preferredKey,
             reason: `Sticky session reused warm account ${preferredKey.alias}.`,
@@ -633,6 +681,7 @@ export class ProxyServer {
 
     const selection = this.keyManager.getNextKey(strategy, {
       excludeKeyIds: attemptedKeyIds,
+      modelTier,
     })
     if (!selection) return null
 
@@ -659,6 +708,10 @@ export class ProxyServer {
       // fall through
     }
     return `HTTP ${statusCode}`
+  }
+
+  private isZenFreeTierError(bodyText: string): boolean {
+    return /FreeTierError|free tier can only be used from within OpenCode/i.test(bodyText)
   }
 
   private prepareRequest(body: Buffer, targetPath: string): RequestPreparation {
