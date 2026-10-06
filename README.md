@@ -218,7 +218,7 @@ Then reference the provider from agents as `multi-auth-zen/<model>`, e.g.
 
 **Important:** the provider name must be unique. Do **not** use `opencode-zen` or `opencode` — those collide with OpenCode's built-in Zen provider and OpenCode will silently route requests directly to `opencode.ai`, bypassing the proxy entirely. Any other name (e.g. `multi-auth-zen`, `proxy-zen`, `my-zen`) works.
 
-When new Zen models appear upstream, the dashboard's **Models** page surfaces a drift banner with a **Copy snippet** button so you can paste missing models into your `models` block. The check runs every 12 hours while the page is open. Do not add `*-free` or `*-contributor-free` models to this proxy provider; select them through the built-in `opencode/` provider instead. You can also change the provider name tracked by the dashboard via the text input next to the Save button (default: `multi-auth-zen`).
+When new Zen models appear upstream, the dashboard's **Models** page surfaces a drift banner with a **Copy snippet** button so you can paste missing models into your `models` block. The check runs every 12 hours while the page is open. Free-tier IDs (`*-free`, `*-contributor-free`) are excluded from the suggestion automatically and listed in a separate muted note, since they require the native session and 403 through the proxy regardless of headers, TLS stack, or source IP (verified against curl, Node, and public-proxy exits). Do not add `*-free` or `*-contributor-free` models to this proxy provider; select them through the built-in `opencode/` provider instead. You can also change the provider name tracked by the dashboard via the text input next to the Save button (default: `multi-auth-zen`).
 
 ## Routing Strategies
 
