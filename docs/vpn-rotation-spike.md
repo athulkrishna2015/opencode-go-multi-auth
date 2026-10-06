@@ -59,6 +59,47 @@ rotation shape — every reconnect lands a fresh egress IP.
 
 ## Detailed plan: scripted rotation via Windows native VPN
 
+### Rotation flow
+
+```mermaid
+flowchart TD
+    A[Start with Vypr desktop disconnected] --> B[Connect one native VPN profile]
+    B --> C{Tunnel connected?}
+    C -- No --> F[Stop; inspect auth, Kill Switch, or tunnel]
+    C -- Yes --> D[Check public egress IP]
+    D --> E{IP changed?}
+    E -- No --> G[Disconnect and try next curated server]
+    G --> B
+    E -- Yes --> H[Send one low-risk proxy request]
+    H --> I{Request succeeds?}
+    I -- No --> J[Record failure; do not rotate in a tight loop]
+    I -- Yes --> K[Keep tunnel; resume normal routing]
+    J --> L[Disconnect native VPN]
+    K --> L
+    L --> M[Reconnect Vypr desktop if returning to normal mode]
+```
+
+The flow deliberately verifies the egress address before using the proxy and
+tests only after a tunnel is established. Run one tunnel at a time; do not
+connect the desktop app and native profile concurrently.
+
+### Optional two-lane topology
+
+```mermaid
+flowchart LR
+    subgraph VPN[VPN egress]
+        O[OpenCode router process] --> P[localhost:18905 multi-auth proxy]
+    end
+    P --> Z[Zen / Go upstreams]
+    C[OpenCode desktop] --> ISP[ISP egress]
+    C -. local proxy requests .-> P
+```
+
+This split is only a hypothesis until per-app routing is verified: the router
+process should use the VPN lane while direct desktop traffic uses the ISP lane.
+If the desktop's requests go through the local proxy, those requests naturally
+inherit the router process's VPN egress instead.
+
 **Safety**: a native VPN profile lives in the Windows RAS phonebook + a
 WAN Miniport adapter instance. It does not modify, remove, or reconfigure the
 Vypr desktop app, its services, drivers, or configs. Rollback =
